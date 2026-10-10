@@ -1,0 +1,5 @@
+<testsuite name="pytest" tests="3">
+  <testcase classname="tests.test_api" name="test_login"/>
+  <testcase classname="tests.test_api" name="test_upload"><failure message="Timeout">ReadTimeout</failure></testcase>
+  <testcase classname="tests.test_api" name="test_skip"><skipped/></testcase>
+</testsuite>

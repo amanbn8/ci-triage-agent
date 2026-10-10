@@ -1,0 +1,8 @@
+2026-10-08T09:14:00.1234567Z ##[group]Run npm ci
+2026-10-08T09:14:01.1234567Z npm ci
+2026-10-08T09:14:02.1234567Z ##[endgroup]
+2026-10-08T09:14:03.1234567Z npm WARN deprecated inflight@1.0.6: This module is not supported
+2026-10-08T09:14:04.1234567Z npm ERR! code ECONNRESET
+2026-10-08T09:14:05.1234567Z npm ERR! network request to https://registry.npmjs.org/react failed, reason: socket hang up
+2026-10-08T09:14:06.1234567Z npm ERR! network This is a problem related to network connectivity.
+2026-10-08T09:14:07.1234567Z ##[error]Process completed with exit code 1.

@@ -1,0 +1,5 @@
+2026-10-08T09:14:00.1234567Z ##[group]Run gh pr comment 42 --body-file report.md
+2026-10-08T09:14:01.1234567Z gh pr comment 42 --body-file report.md
+2026-10-08T09:14:02.1234567Z ##[endgroup]
+2026-10-08T09:14:03.1234567Z GraphQL: Resource not accessible by integration (addComment)
+2026-10-08T09:14:04.1234567Z ##[error]Process completed with exit code 1.

@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: CI Triage Agent - comments a diagnosis on PRs whose CI fails
+
+Parameters:
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: Token with actions:read and pull-requests:write
+  WebhookSecret:
+    Type: String
+    NoEcho: true
+    Description: Shared secret configured on the GitHub webhook
+  BedrockModelId:
+    Type: String
+    Default: ""
+    Description: Optional Bedrock model id for the AI fallback (leave empty to disable)
+
+Conditions:
+  UseBedrock: !Not [!Equals [!Ref BedrockModelId, ""]]
+
+Resources:
+  TriageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: citriage.webhook.lambda_handler
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          GITHUB_TOKEN: !Ref GitHubToken
+          WEBHOOK_SECRET: !Ref WebhookSecret
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - !If
+          - UseBedrock
+          - Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: "*"
+          - !Ref AWS::NoValue
+      FunctionUrlConfig:
+        AuthType: NONE   # GitHub cannot sign AWS requests; the HMAC check authenticates instead
+
+Outputs:
+  WebhookUrl:
+    Description: "Paste this into GitHub -> Settings -> Webhooks (event: Workflow runs)"
+    Value: !GetAtt TriageFunctionUrl.FunctionUrl

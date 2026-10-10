@@ -1,0 +1,6 @@
+2026-10-08T09:14:00.1234567Z ##[group]Run ./deploy.sh
+2026-10-08T09:14:01.1234567Z ./deploy.sh
+2026-10-08T09:14:02.1234567Z ##[endgroup]
+2026-10-08T09:14:03.1234567Z Uploading bundle to staging...
+2026-10-08T09:14:04.1234567Z deploy: remote rejected manifest v2 (schema mismatch)
+2026-10-08T09:14:05.1234567Z ##[error]Process completed with exit code 3.

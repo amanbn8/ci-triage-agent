@@ -1,0 +1,21 @@
+2026-10-08T09:14:00.1234567Z ##[group]Run actions/checkout@v4
+2026-10-08T09:14:01.1234567Z Syncing repository: amanbn8/demo
+2026-10-08T09:14:02.1234567Z ##[endgroup]
+2026-10-08T09:14:03.1234567Z ##[group]Run pip install -r requirements.txt
+2026-10-08T09:14:04.1234567Z pip install -r requirements.txt
+2026-10-08T09:14:05.1234567Z ##[endgroup]
+2026-10-08T09:14:06.1234567Z Successfully installed requests-2.32.3
+2026-10-08T09:14:07.1234567Z ##[group]Run pytest -q
+2026-10-08T09:14:08.1234567Z pytest -q
+2026-10-08T09:14:09.1234567Z ##[endgroup]
+2026-10-08T09:14:10.1234567Z [31mF[0m.....
+2026-10-08T09:14:11.1234567Z =================================== FAILURES ===================================
+2026-10-08T09:14:12.1234567Z ______________________________ test_parse_date ______________________________
+2026-10-08T09:14:13.1234567Z     def test_parse_date():
+2026-10-08T09:14:14.1234567Z >       assert parse_date('2026-10-08').day == 9
+2026-10-08T09:14:15.1234567Z E       AssertionError: assert 8 == 9
+2026-10-08T09:14:16.1234567Z tests/test_dates.py:14: AssertionError
+2026-10-08T09:14:17.1234567Z =========================== short test summary info ============================
+2026-10-08T09:14:18.1234567Z FAILED tests/test_dates.py::test_parse_date - AssertionError: assert 8 == 9
+2026-10-08T09:14:19.1234567Z ========================= 1 failed, 5 passed in 0.42s ==========================
+2026-10-08T09:14:20.1234567Z ##[error]Process completed with exit code 1.

@@ -1,0 +1,8 @@
+2026-10-08T09:14:00.1234567Z ##[group]Run npm run build
+2026-10-08T09:14:01.1234567Z npm run build
+2026-10-08T09:14:02.1234567Z ##[endgroup]
+2026-10-08T09:14:03.1234567Z > next build
+2026-10-08T09:14:04.1234567Z Creating an optimized production build ...
+2026-10-08T09:14:05.1234567Z <--- Last few GCs --->
+2026-10-08T09:14:06.1234567Z FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory
+2026-10-08T09:14:07.1234567Z ##[error]Process completed with exit code 137.

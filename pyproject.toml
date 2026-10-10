@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ci-triage-agent"
+version = "0.1.0"
+description = "Explains why a CI run failed: rule-based triage, flaky-test detection, MCP server and AWS Lambda webhook"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Aman Bansal" }]
+dependencies = []
+
+[project.optional-dependencies]
+aws = ["boto3>=1.34"]
+
+[project.scripts]
+citriage = "citriage.__main__:main"
+
+[tool.setuptools]
+packages = ["citriage"]

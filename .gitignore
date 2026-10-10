@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.aws-sam/
+.venv/
+samconfig.toml
+*.egg-info/
+build/
+dist/
