@@ -6,3 +6,4 @@ samconfig.toml
 *.egg-info/
 build/
 dist/
+secret.json
