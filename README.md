@@ -42,6 +42,17 @@ Suggested fix: macOS runners ship BSD tools. Use portable flags (sed -i '' vs se
    CLI (__main__)     MCP server (stdio)     Lambda webhook (GitHub ─▶ PR comment)
 ```
 
+The webhook is two Lambda functions joined by an SQS queue, because GitHub stops waiting
+for a reply after 10 seconds:
+
+```
+GitHub ──▶ Receiver Lambda ──▶ SQS queue ──▶ Worker Lambda ──▶ one PR comment
+           checks HMAC,                      fetches logs, triages
+           replies 202 at once               every failed job
+                                  │
+                                  └─ fails 3 times ─▶ dead-letter queue (kept 14 days)
+```
+
 **Design choice: rules first, LLM second.** Known failures are diagnosed instantly, for free and
 deterministically. The model is called only for the unknown or low-confidence cases, and gets
 only the evidence lines, which keeps cost low and the answer grounded in the actual log.
@@ -49,7 +60,7 @@ only the evidence lines, which keeps cost low and the answer grounded in the act
 ## Quick start (Python 3.10+, no dependencies)
 
 ```bash
-python -m unittest -v                                   # 37 tests
+python -m unittest -v                                   # 43 tests
 python -m citriage triage samples/pytest_failure.log
 python -m citriage triage samples/npm_network.log --json
 python -m citriage flaky --junit samples/junit_run1.xml:abc123 samples/junit_run2.xml:abc123
@@ -90,14 +101,15 @@ aws secretsmanager create-secret --name ci-triage-agent --secret-string file://s
 sam build && sam deploy --guided     # asks for SecretName and an optional BedrockModelId
 ```
 
-Then add a GitHub webhook for **Workflow runs** pointing at the output URL, with the same
-webhook secret. On each failed or timed-out run the Lambda verifies the `X-Hub-Signature-256`
-HMAC, fetches the failed jobs' logs (all pages, not just the first 100), triages them and
-comments on the PR, including PRs from forks. A hidden marker makes re-runs **update** that
-comment instead of adding new ones.
+Then add a GitHub webhook for **Workflow runs** pointing at the `WebhookUrl` output, with the
+same webhook secret. On each failed or timed-out run the receiver verifies the
+`X-Hub-Signature-256` HMAC, queues the run and replies at once. The worker then fetches every
+failed job's log (all pages, not just the first 100), triages each one and posts **one comment
+listing all failed jobs** on the PR, including PRs from forks. A hidden marker makes re-runs
+**update** that comment instead of adding new ones, which also makes queue retries safe.
 
-Set `BedrockModelId` to enable the AI fallback. The function's IAM role may invoke only that
-model (directly or through its inference profile) and read only that one secret.
+Set `BedrockModelId` to enable the AI fallback. Only the worker may call Bedrock, and only that
+model (directly or through its inference profile); each function may read only the one secret.
 
 > Status: the template passes `cfn-lint` and the webhook logic is unit-tested with fake GitHub
 > and AWS clients, but it has not yet been deployed or called by a real GitHub webhook.
@@ -132,7 +144,6 @@ Add a sample log under `samples/` and a case in `tests/` so the rule stays corre
 ## Limitations and next steps
 
 - Rules are regexes: precise for known failures, blind to new ones (that is what the LLM fallback is for).
-- The webhook does all its work before replying; GitHub expects a reply within 10 seconds.
-- Each failed job updates the same PR comment, so with several failed jobs only the last diagnosis is shown.
+- A comment shows at most 20 failed jobs; the rest are counted but not detailed.
 - Flaky detection needs history; the webhook does not store JUnit results yet (next: S3 or DynamoDB).
 - Next: a GitHub Action wrapper and a small dashboard of the most common failure fingerprints.

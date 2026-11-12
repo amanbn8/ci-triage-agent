@@ -1,8 +1,14 @@
 """AWS Lambda webhook: GitHub calls it when a workflow run finishes.
 
-Flow: verify the HMAC signature -> ignore anything but a failed run -> fetch
-each failed job's log -> triage -> post (or update) one comment on the PR.
-The comment carries a hidden marker so re-runs edit it instead of spamming.
+Two Lambda functions, joined by an SQS queue:
+
+1. Receiver (receive): verify the HMAC signature, ignore anything but a failed
+   run, put a small note on the queue and reply 202 at once. GitHub waits at
+   most 10 seconds for a reply, so this step does no slow work.
+2. Worker (process_run): started by SQS for each note. Fetches every failed
+   job's log, triages each one, and posts (or updates) ONE comment listing all
+   of them. The comment carries a hidden marker so re-runs edit it instead of
+   spamming; that also makes SQS retries safe.
 
 "Failed" means conclusion "failure" or "timed_out" (a run that hit its time
 limit). PRs from forks are not listed in the payload, so they are looked up
@@ -18,7 +24,7 @@ import urllib.parse
 import urllib.request
 
 from .explain import maybe_explain
-from .report import MARKER, to_markdown
+from .report import MARKER, combined_markdown
 from .triage import triage_log
 
 FAILED_CONCLUSIONS = {"failure", "timed_out"}
@@ -38,7 +44,8 @@ def _response(status: int, body: dict) -> dict:
             "body": json.dumps(body)}
 
 
-def handle_event(event: dict, github, secret: str, explainer=None) -> dict:
+def receive(event: dict, secret: str, queue) -> dict:
+    """Step 1: check the delivery and queue it. Must answer GitHub within 10 seconds."""
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     raw = event.get("body") or ""
     body = base64.b64decode(raw) if event.get("isBase64Encoded") else raw.encode()
@@ -48,21 +55,69 @@ def handle_event(event: dict, github, secret: str, explainer=None) -> dict:
     if headers.get("x-github-event") != "workflow_run":
         return _response(202, {"ignored": "not a workflow_run event"})
 
-    payload = json.loads(body)
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return _response(400, {"error": "body is not JSON"})
+    if not isinstance(payload, dict):
+        return _response(400, {"error": "body is not a JSON object"})
     run = payload.get("workflow_run") or {}
     if payload.get("action") != "completed" or run.get("conclusion") not in FAILED_CONCLUSIONS:
         return _response(202, {"ignored": "run did not fail"})
 
-    repo = payload["repository"]["full_name"]
+    repo = (payload.get("repository") or {}).get("full_name")
+    if not repo or "id" not in run:
+        return _response(400, {"error": "payload is missing repository or run id"})
+    queue.send({"repo": repo, "run": _slim_run(run)})
+    return _response(202, {"queued": run["id"]})
+
+
+def _slim_run(run: dict) -> dict:
+    """Only the fields the worker needs, so the queued note stays small."""
+    owner = ((run.get("head_repository") or {}).get("owner") or {}).get("login")
+    return {
+        "id": run["id"],
+        "event": run.get("event"),
+        "head_branch": run.get("head_branch"),
+        "head_repository": {"owner": {"login": owner}},
+        "pull_requests": [{"number": pr["number"]} for pr in run.get("pull_requests") or []],
+    }
+
+
+def process_run(message: dict, github, explainer=None) -> dict:
+    """Step 2: triage every failed job of the run and post one combined comment."""
+    repo, run = message["repo"], message["run"]
     prs = find_prs(github, repo, run)
-    triaged = []
+    jobs = []
     for job in github.failed_jobs(repo, run["id"]):
         diagnosis = maybe_explain(triage_log(github.job_log(repo, job["id"])), explainer)
-        triaged.append({"job": job["name"], **diagnosis.to_dict()})
-        comment = to_markdown(diagnosis, job["name"], job.get("html_url", ""))
+        jobs.append((job["name"], job.get("html_url", ""), diagnosis))
+    if jobs:
+        comment = combined_markdown(jobs)
         for pr in prs:
             github.upsert_comment(repo, pr, comment, MARKER)
-    return _response(200, {"run_id": run["id"], "jobs": triaged})
+    return {"run_id": run["id"], "prs": prs,
+            "jobs": [{"job": name, **d.to_dict()} for name, _, d in jobs]}
+
+
+def handle_sqs_event(event: dict, github, explainer=None) -> None:
+    """The worker's input: SQS hands over a batch of records, each holding one note.
+
+    If anything raises, SQS makes the note visible again and retries it; after
+    3 failed tries it moves to the dead-letter queue (see template.yaml).
+    """
+    for record in event["Records"]:
+        process_run(json.loads(record["body"]), github, explainer)
+
+
+class SqsQueue:
+    """Sends notes to an SQS queue. The boto3 client is passed in, so tests can fake it."""
+
+    def __init__(self, client, queue_url: str):
+        self.client, self.queue_url = client, queue_url
+
+    def send(self, message: dict) -> None:
+        self.client.send_message(QueueUrl=self.queue_url, MessageBody=json.dumps(message))
 
 
 def find_prs(github, repo: str, run: dict) -> list[int]:
@@ -145,14 +200,24 @@ def load_secrets(secret_id: str, client) -> tuple[str, str]:
 _secrets = None  # kept between calls in the same Lambda container: one read per cold start
 
 
-def lambda_handler(event, context):  # pragma: no cover - AWS entry point
+def _get_secrets() -> tuple[str, str]:  # pragma: no cover - needs AWS
     global _secrets
     if _secrets is None:
         import boto3  # ships with the AWS Lambda Python runtime, so nothing extra to package
         _secrets = load_secrets(os.environ["SECRET_ID"], boto3.client("secretsmanager"))
-    token, webhook_secret = _secrets
+    return _secrets
+
+
+def receiver_handler(event, context):  # pragma: no cover - AWS entry point (Function URL)
+    import boto3
+    _, webhook_secret = _get_secrets()
+    return receive(event, webhook_secret, SqsQueue(boto3.client("sqs"), os.environ["QUEUE_URL"]))
+
+
+def worker_handler(event, context):  # pragma: no cover - AWS entry point (SQS trigger)
+    token, _ = _get_secrets()
     explainer = None
     if os.environ.get("BEDROCK_MODEL_ID"):
         from .explain import bedrock_explainer
         explainer = bedrock_explainer()
-    return handle_event(event, GitHubClient(token), webhook_secret, explainer)
+    handle_sqs_event(event, GitHubClient(token), explainer)
