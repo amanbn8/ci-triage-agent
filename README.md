@@ -60,7 +60,7 @@ only the evidence lines, which keeps cost low and the answer grounded in the act
 ## Quick start (Python 3.10+, no dependencies)
 
 ```bash
-python -m unittest -v                                   # 43 tests
+python -m unittest -v                                   # 44 tests
 python -m citriage triage samples/pytest_failure.log
 python -m citriage triage samples/npm_network.log --json
 python -m citriage flaky --junit samples/junit_run1.xml:abc123 samples/junit_run2.xml:abc123

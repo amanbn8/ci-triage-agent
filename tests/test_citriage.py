@@ -52,6 +52,17 @@ class TriageTests(unittest.TestCase):
                 self.assertTrue(d.evidence)
                 self.assertFalse(any("##[error]" in e for e in d.evidence))
 
+    def test_bsd_sed_error_split_over_two_lines(self):
+        # Real output of `sed -i 's/demo/test/' README.md` on macOS 27: BSD sed
+        # prints a line break inside the quotes, so the error spans two lines.
+        log = ("##[group]Run sed -i 's/demo/test/' README.md\n"
+               'sed: 1: "README.md\n'
+               '": invalid command code R\n'
+               "##[error]Process completed with exit code 1.\n")
+        d = triage_log(log)
+        self.assertEqual(d.rule_id, "bsd-gnu-tool-mismatch")
+        self.assertEqual(d.category, "platform_specific")
+
     def test_unknown_still_shows_evidence(self):
         d = triage_log(sample("unknown.log"))
         self.assertEqual(d.category, "unknown")
