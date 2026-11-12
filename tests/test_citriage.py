@@ -155,6 +155,26 @@ class ReportAndExplainTests(unittest.TestCase):
         d = maybe_explain(triage_log(sample("unknown.log")), lambda p: "not json")
         self.assertEqual(d.category, "unknown")
 
+    def test_incomplete_llm_answer_changes_nothing(self):
+        # Limitation 10: a reply missing "fix" used to change the title but not the fix.
+        before = triage_log(sample("unknown.log")).to_dict()
+
+        def broken_bedrock(prompt):
+            raise RuntimeError("ThrottlingException")
+
+        for explainer in (lambda p: '{"cause": "manifest schema changed"}',
+                          lambda p: '{"cause": "x", "fix": "y", "retryable": "false"}',
+                          broken_bedrock):
+            with self.subTest(explainer=explainer):
+                after = maybe_explain(triage_log(sample("unknown.log")), explainer)
+                self.assertEqual(after.to_dict(), before)
+
+    def test_llm_json_inside_code_fence_is_accepted(self):
+        reply = '```json\n{"cause": "schema changed", "fix": "regenerate", "retryable": true}\n```'
+        d = maybe_explain(triage_log(sample("unknown.log")), lambda p: reply)
+        self.assertEqual(d.category, "llm_diagnosed")
+        self.assertTrue(d.retryable)
+
     def test_prompt_sends_evidence_not_whole_log(self):
         prompt = build_prompt(triage_log(sample("pytest_failure.log")))
         self.assertIn("FAILED tests/test_dates.py::test_parse_date", prompt)
