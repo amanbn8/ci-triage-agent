@@ -35,7 +35,8 @@ TOOLS = [
     },
     {
         "name": "find_flaky_tests",
-        "description": "Find flaky tests: tests that both passed and failed on the same commit.",
+        "description": "Find flaky tests: tests that both passed and failed on the same commit. "
+                       "Give run_number (higher = later) so flip rate uses the real run order.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -47,6 +48,7 @@ TOOLS = [
                             "test_id": {"type": "string"},
                             "commit": {"type": "string"},
                             "passed": {"type": "boolean"},
+                            "run_number": {"type": "integer"},
                         },
                         "required": ["test_id", "commit", "passed"],
                     },
@@ -94,7 +96,9 @@ def call_tool(name: str, args: dict) -> dict:
             return _text(diagnosis.to_dict())
         return _text(to_markdown(diagnosis))
     if name == "find_flaky_tests":
-        results = [TestResult(r["test_id"], r["commit"], bool(r["passed"])) for r in args["results"]]
+        results = [TestResult(r["test_id"], r["commit"], bool(r["passed"]),
+                              run_number=int(r.get("run_number", 0)))
+                   for r in args["results"]]
         return _text(find_flaky(results))
     if name == "fingerprint_error":
         return _text({"fingerprint": fingerprint(_string_arg(args, "message"))})

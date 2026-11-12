@@ -120,6 +120,13 @@ class FlakyTests(unittest.TestCase):
         results = [TestResult("t", "c1", False), TestResult("t", "c2", True)]
         self.assertEqual(find_flaky(results), [])
 
+    def test_flip_rate_follows_run_number_not_input_order(self):
+        # Limitation 13: flips were counted in whatever order results arrived.
+        # True order: pass, pass, fail, fail = 1 flip in 3 changes (0.33).
+        shuffled = [TestResult("t", "c", False, run_number=3), TestResult("t", "c", True, run_number=1),
+                    TestResult("t", "c", False, run_number=4), TestResult("t", "c", True, run_number=2)]
+        self.assertEqual(find_flaky(shuffled)[0]["flip_rate"], 0.33)
+
     def test_skipped_tests_ignored(self):
         ids = {r.test_id for r in parse_junit(sample("junit_run1.xml"), "c")}
         self.assertNotIn("tests.test_api::test_skip", ids)
