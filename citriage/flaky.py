@@ -3,6 +3,11 @@
 A test is flaky when the *same commit* produced both a pass and a fail: the
 code did not change, so the result depends on timing, ordering or the network.
 Results come from JUnit XML (pytest --junitxml, Jest, Go, Maven all emit it).
+
+Flip rate counts pass<->fail changes from one run to the next, so it needs the
+runs in time order. Each result carries a run_number (e.g. GitHub's run number)
+and results are sorted by it first; results with equal numbers keep the order
+they were given in.
 """
 
 import xml.etree.ElementTree as ET
@@ -16,9 +21,10 @@ class TestResult:
     commit: str
     passed: bool
     run_id: str = ""
+    run_number: int = 0  # position in time: higher = later run
 
 
-def parse_junit(xml_text: str, commit: str, run_id: str = "") -> list[TestResult]:
+def parse_junit(xml_text: str, commit: str, run_id: str = "", run_number: int = 0) -> list[TestResult]:
     """Read every <testcase>; it failed if it holds <failure> or <error>. Skips are ignored."""
     root = ET.fromstring(xml_text)
     results = []
@@ -27,7 +33,7 @@ def parse_junit(xml_text: str, commit: str, run_id: str = "") -> list[TestResult
             continue
         name = f"{case.get('classname', '')}::{case.get('name', '')}".strip(":")
         failed = case.find("failure") is not None or case.find("error") is not None
-        results.append(TestResult(name, commit, not failed, run_id))
+        results.append(TestResult(name, commit, not failed, run_id, run_number))
     return results
 
 
@@ -40,6 +46,7 @@ def find_flaky(results: list[TestResult], min_runs: int = 2) -> list[dict]:
     for test_id, runs in by_test.items():
         if len(runs) < min_runs:
             continue
+        runs = sorted(runs, key=lambda r: r.run_number)  # oldest first; sorted() is stable
         outcomes_by_commit: dict[str, set[bool]] = defaultdict(set)
         for r in runs:
             outcomes_by_commit[r.commit].add(r.passed)

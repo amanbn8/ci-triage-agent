@@ -12,7 +12,7 @@ blips, and someone had to read hundreds of log lines to find out which.
 $ python -m citriage triage samples/macos_sed.log
 
 ### CI triage: Shell script uses GNU-only flags on macOS
-Category: platform_specific · Confidence: 100% · Failing step: ./scripts/check-go-version.sh
+Category: platform_specific · Confidence: 86% · Failing step: ./scripts/check-go-version.sh
 > Needs a code or config change; a re-run will not fix it.
 Suggested fix: macOS runners ship BSD tools. Use portable flags (sed -i '' vs sed -i, avoid grep -P)...
 ```
@@ -24,9 +24,9 @@ Suggested fix: macOS runners ship BSD tools. Use portable flags (sed -i '' vs se
 | **Find the failing step** | Splits GitHub Actions logs into steps (`##[group]Run …`) and finds the one with `##[error]` |
 | **Classify the failure** | 15 rule signatures: test failures (pytest, Jest, Go), compile errors, lint, missing dependencies, network flakes, rate limits, permissions, out-of-memory, disk full, timeouts, macOS BSD-vs-GNU tool mismatches, checkout errors |
 | **Say if a re-run helps** | Each rule is marked retryable or not, so transient failures are not debugged by hand |
-| **Score confidence** | Matches inside the failing step count double; confidence = top rule's share of the total score, with runner-up categories listed |
+| **Score confidence** | Matches inside the failing step count double, and a rule that matched there always outranks rules that only matched in earlier steps. Confidence = top score / (all scores + 1), so one match is never 100%; runner-up categories are listed |
 | **Group repeat failures** | Fingerprints errors after stripping paths, numbers, hashes and UUIDs, so the same failure hashes the same across runs |
-| **Detect flaky tests** | Reads JUnit XML; a test that passed *and* failed on the same commit is flaky (reports fail rate and flip rate) |
+| **Detect flaky tests** | Reads JUnit XML; a test that passed *and* failed on the same commit is flaky (reports fail rate, and flip rate in run order) |
 | **AI fallback** | Only when rules are unsure, sends the failing step's evidence lines (not the whole log) to an LLM on **Amazon Bedrock** |
 
 ## Architecture
@@ -49,11 +49,14 @@ only the evidence lines, which keeps cost low and the answer grounded in the act
 ## Quick start (Python 3.10+, no dependencies)
 
 ```bash
-python -m unittest -v                                   # 22 tests
+python -m unittest -v                                   # 37 tests
 python -m citriage triage samples/pytest_failure.log
 python -m citriage triage samples/npm_network.log --json
 python -m citriage flaky --junit samples/junit_run1.xml:abc123 samples/junit_run2.xml:abc123
 ```
+
+For `flaky`, list JUnit files oldest run first; in history JSON (or the MCP tool) give each
+result a `run_number` so the flip rate uses the real run order.
 
 ## Use it from an AI assistant (MCP)
 
@@ -77,14 +80,27 @@ tools/call, ping), so it needs no SDK.
 
 ## Run it on every failed PR build (AWS Lambda)
 
+The GitHub token and webhook secret live in **AWS Secrets Manager**, not in Lambda environment
+variables. Create the secret once (put the JSON in a file so the token does not end up in your
+shell history):
+
 ```bash
-sam build && sam deploy --guided     # asks for GitHub token + webhook secret
+# secret.json: {"github_token": "<token with actions:read, pull-requests:write>", "webhook_secret": "<random string>"}
+aws secretsmanager create-secret --name ci-triage-agent --secret-string file://secret.json
+sam build && sam deploy --guided     # asks for SecretName and an optional BedrockModelId
 ```
 
-Then add a GitHub webhook for **Workflow runs** pointing at the output URL. On each failed run
-the Lambda verifies the `X-Hub-Signature-256` HMAC, fetches the failed jobs' logs, triages
-them and posts one comment on the PR. A hidden marker makes re-runs **update** that comment
-instead of adding new ones. Set `BEDROCK_MODEL_ID` to enable the AI fallback.
+Then add a GitHub webhook for **Workflow runs** pointing at the output URL, with the same
+webhook secret. On each failed or timed-out run the Lambda verifies the `X-Hub-Signature-256`
+HMAC, fetches the failed jobs' logs (all pages, not just the first 100), triages them and
+comments on the PR, including PRs from forks. A hidden marker makes re-runs **update** that
+comment instead of adding new ones.
+
+Set `BedrockModelId` to enable the AI fallback. The function's IAM role may invoke only that
+model (directly or through its inference profile) and read only that one secret.
+
+> Status: the template passes `cfn-lint` and the webhook logic is unit-tested with fake GitHub
+> and AWS clients, but it has not yet been deployed or called by a real GitHub webhook.
 
 ## Project layout
 
@@ -116,5 +132,7 @@ Add a sample log under `samples/` and a case in `tests/` so the rule stays corre
 ## Limitations and next steps
 
 - Rules are regexes: precise for known failures, blind to new ones (that is what the LLM fallback is for).
+- The webhook does all its work before replying; GitHub expects a reply within 10 seconds.
+- Each failed job updates the same PR comment, so with several failed jobs only the last diagnosis is shown.
 - Flaky detection needs history; the webhook does not store JUnit results yet (next: S3 or DynamoDB).
 - Next: a GitHub Action wrapper and a small dashboard of the most common failure fingerprints.

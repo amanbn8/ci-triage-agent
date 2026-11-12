@@ -36,18 +36,48 @@ def build_prompt(d: Diagnosis) -> str:
     )
 
 
+def parse_answer(reply: str) -> dict | None:
+    """Read the model's JSON reply. Returns None unless every field is present and valid."""
+    # Models often wrap JSON in a ```json fence; take the text between the outer braces.
+    start, end = reply.find("{"), reply.rfind("}")
+    if start == -1 or end < start:
+        return None
+    try:
+        answer = json.loads(reply[start:end + 1])
+    except ValueError:
+        return None
+    if not isinstance(answer, dict):
+        return None
+    cause, fix = answer.get("cause"), answer.get("fix")
+    if not (isinstance(cause, str) and cause.strip() and isinstance(fix, str) and fix.strip()):
+        return None
+    retryable = answer.get("retryable")
+    if retryable is not None and not isinstance(retryable, bool):
+        return None  # e.g. the string "false", which bool() would turn into True
+    return {"cause": cause.strip(), "fix": fix.strip(), "retryable": retryable}
+
+
 def maybe_explain(d: Diagnosis, explainer: Explainer | None) -> Diagnosis:
-    """Ask the model only when the rules are unsure; never let it break triage."""
+    """Ask the model only when the rules are unsure; never let it break triage.
+
+    All-or-nothing: the diagnosis is changed only after the whole reply has been
+    checked, so a bad reply can never leave it half-updated.
+    """
     if explainer is None or not needs_llm(d):
         return d
     try:
-        answer = json.loads(explainer(build_prompt(d)))
-        d.title = f"Likely cause: {answer['cause']}"
-        d.suggested_fix = answer["fix"]
-        d.retryable = bool(answer.get("retryable", d.retryable))
-        d.category = d.category if d.category != "unknown" else "llm_diagnosed"
-    except (ValueError, KeyError, TypeError):
-        pass  # malformed model output: keep the rule-based diagnosis
+        reply = explainer(build_prompt(d))
+    except Exception:
+        return d  # Bedrock down, throttled or misconfigured: keep the rule-based diagnosis
+    answer = parse_answer(reply) if isinstance(reply, str) else None
+    if answer is None:
+        return d  # malformed model output: keep the rule-based diagnosis
+    d.title = f"Likely cause: {answer['cause']}"
+    d.suggested_fix = answer["fix"]
+    if answer["retryable"] is not None:
+        d.retryable = answer["retryable"]
+    if d.category == "unknown":
+        d.category = "llm_diagnosed"
     return d
 
 

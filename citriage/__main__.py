@@ -2,8 +2,8 @@
 
     python -m citriage triage job.log            # Markdown diagnosis
     python -m citriage triage job.log --json     # machine-readable
-    python -m citriage flaky history.json        # flaky tests from [{test_id, commit, passed}]
-    python -m citriage flaky --junit a.xml:sha1 b.xml:sha2
+    python -m citriage flaky history.json        # [{test_id, commit, passed, run_number?}]
+    python -m citriage flaky --junit a.xml:sha1 b.xml:sha2   # files oldest first
     python -m citriage mcp                       # run as an MCP server on stdio
 """
 
@@ -25,8 +25,10 @@ def main(argv=None) -> int:
     t.add_argument("--json", action="store_true")
 
     f = sub.add_parser("flaky", help="find flaky tests")
-    f.add_argument("history", nargs="?", help="JSON list of {test_id, commit, passed}")
-    f.add_argument("--junit", nargs="*", default=[], metavar="FILE:COMMIT")
+    f.add_argument("history", nargs="?",
+                   help="JSON list of {test_id, commit, passed, run_number (optional)}")
+    f.add_argument("--junit", nargs="*", default=[], metavar="FILE:COMMIT",
+                   help="JUnit XML files, oldest run first")
 
     sub.add_parser("mcp", help="run the MCP server on stdio")
     args = parser.parse_args(argv)
@@ -41,12 +43,13 @@ def main(argv=None) -> int:
         results = []
         if args.history:
             with open(args.history, encoding="utf-8") as fh:
-                results += [TestResult(r["test_id"], r["commit"], bool(r["passed"]))
+                results += [TestResult(r["test_id"], r["commit"], bool(r["passed"]),
+                                        run_number=int(r.get("run_number", 0)))
                             for r in json.load(fh)]
-        for spec in args.junit:
+        for position, spec in enumerate(args.junit, start=1):
             path, _, commit = spec.rpartition(":")
             with open(path, encoding="utf-8") as fh:
-                results += parse_junit(fh.read(), commit)
+                results += parse_junit(fh.read(), commit, run_number=position)
         print(json.dumps(find_flaky(results), indent=2))
         return 0
 
