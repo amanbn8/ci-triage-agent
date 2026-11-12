@@ -70,6 +70,32 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(d.alternatives[0]["category"], "network")
         self.assertLess(d.confidence, 1.0)
 
+    def test_one_match_is_not_fully_confident(self):
+        # Limitation 4: a single matching rule used to give 100% confidence.
+        log = ("##[group]Run ./upload.sh\n"
+               "cp: report.txt: Permission denied\n"
+               "##[error]Process completed with exit code 1.\n")
+        d = triage_log(log)
+        self.assertEqual(d.category, "permission")
+        self.assertGreater(d.confidence, 0.5)
+        self.assertLess(d.confidence, 1.0)
+
+    def test_failing_step_beats_many_earlier_warnings(self):
+        # Limitation 5: three different network warnings in an earlier step
+        # (score 3.0) used to beat one real test failure in the failing step (2.4).
+        log = (
+            "##[group]Run pip install -r requirements.txt\n"
+            "WARNING: Retrying after connection broken by ECONNRESET\n"
+            "WARNING: got 503 Service Unavailable from mirror, retrying\n"
+            "WARNING: Temporary failure in name resolution, retrying\n"
+            "##[group]Run pytest\n"
+            "FAILED tests/test_a.py::test_one - assert 1 == 2\n"
+            "##[error]Process completed with exit code 1.\n"
+        )
+        d = triage_log(log)
+        self.assertEqual(d.category, "test_failure")
+        self.assertEqual(d.alternatives[0]["category"], "network")
+
 
 class FingerprintTests(unittest.TestCase):
     def test_noise_removed(self):
