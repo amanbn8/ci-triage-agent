@@ -202,6 +202,26 @@ class McpTests(unittest.TestCase):
         self.assertEqual(replies[1]["error"]["code"], -32700)
         self.assertEqual(len(replies), 2)
 
+    def test_invalid_requests(self):
+        # Limitation 9: valid JSON that is not an object used to crash serve(),
+        # and a request with no method got -32601 instead of -32600.
+        stdin = io.StringIO('[1, 2]\n42\n{"jsonrpc":"2.0","id":3}\n'
+                            '{"jsonrpc":"2.0","id":4,"method":"ping","params":[1]}\n'
+                            '{"jsonrpc":"2.0","id":5,"method":"ping"}\n')
+        stdout = io.StringIO()
+        serve(stdin, stdout)
+        replies = [json.loads(l) for l in stdout.getvalue().splitlines()]
+        self.assertEqual([r.get("error", {}).get("code") for r in replies],
+                         [-32600, -32600, -32600, -32602, None])
+        self.assertEqual([r["id"] for r in replies], [None, None, 3, 4, 5])
+
+    def test_wrong_argument_type_is_tool_error(self):
+        # A number instead of a string used to raise AttributeError and stop the server.
+        res = self.rpc("tools/call", {"name": "triage_ci_log", "arguments": {"log": 123}})
+        self.assertTrue(res["result"]["isError"])
+        res = self.rpc("tools/call", {"name": "fingerprint_error", "arguments": {"message": None}})
+        self.assertTrue(res["result"]["isError"])
+
 
 class FakeGitHub:
     def __init__(self, log):

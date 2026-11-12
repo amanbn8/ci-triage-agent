@@ -79,9 +79,17 @@ def _text(payload) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": False}
 
 
+def _string_arg(args: dict, key: str) -> str:
+    """Read a required text argument; wrong types become a tool error, not a crash."""
+    value = args[key]
+    if not isinstance(value, str):
+        raise TypeError(f"'{key}' must be a string")
+    return value
+
+
 def call_tool(name: str, args: dict) -> dict:
     if name == "triage_ci_log":
-        diagnosis = triage_log(args["log"])
+        diagnosis = triage_log(_string_arg(args, "log"))
         if args.get("format") == "json":
             return _text(diagnosis.to_dict())
         return _text(to_markdown(diagnosis))
@@ -89,17 +97,29 @@ def call_tool(name: str, args: dict) -> dict:
         results = [TestResult(r["test_id"], r["commit"], bool(r["passed"])) for r in args["results"]]
         return _text(find_flaky(results))
     if name == "fingerprint_error":
-        return _text({"fingerprint": fingerprint(args["message"])})
+        return _text({"fingerprint": fingerprint(_string_arg(args, "message"))})
     raise RpcError(-32602, f"Unknown tool: {name}")
 
 
-def handle(message: dict) -> dict | None:
+def _error(msg_id, code: int, text: str) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": text}}
+
+
+def handle(message) -> dict | None:
     """Process one JSON-RPC message; return the response, or None for notifications."""
+    # JSON-RPC 2.0: a request must be an object with a string "method";
+    # anything else is an "Invalid Request" (-32600), not "Method not found".
+    if not isinstance(message, dict):
+        return _error(None, -32600, "Invalid Request: expected a JSON object")
     msg_id = message.get("id")
     method = message.get("method")
     params = message.get("params") or {}
+    if not isinstance(method, str):
+        return _error(msg_id, -32600, "Invalid Request: missing method")
     if msg_id is None:
         return None  # notification (e.g. notifications/initialized): no reply allowed
+    if not isinstance(params, dict):
+        return _error(msg_id, -32602, "Invalid params: expected an object")
     try:
         if method == "initialize":
             requested = params.get("protocolVersion")
@@ -124,7 +144,9 @@ def handle(message: dict) -> dict | None:
             raise RpcError(-32601, f"Method not found: {method}")
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
     except RpcError as exc:
-        return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": exc.code, "message": str(exc)}}
+        return _error(msg_id, exc.code, str(exc))
+    except Exception as exc:  # last line of defence: one bad message must not stop the server
+        return _error(msg_id, -32603, f"Internal error: {exc}")
 
 
 def serve(stdin=sys.stdin, stdout=sys.stdout) -> None:
@@ -134,8 +156,7 @@ def serve(stdin=sys.stdin, stdout=sys.stdout) -> None:
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
-            response = {"jsonrpc": "2.0", "id": None,
-                        "error": {"code": -32700, "message": "Parse error"}}
+            response = _error(None, -32700, "Parse error")
         else:
             response = handle(message)
         if response is not None:
