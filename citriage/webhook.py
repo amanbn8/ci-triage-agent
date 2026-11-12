@@ -130,10 +130,29 @@ class GitHubClient:
             self._req("POST", f"/repos/{repo}/issues/{pr}/comments", {"body": body})
 
 
+def load_secrets(secret_id: str, client) -> tuple[str, str]:
+    """Read (github_token, webhook_secret) from one AWS Secrets Manager secret.
+
+    The secret's value is JSON: {"github_token": "...", "webhook_secret": "..."}.
+    Keeping them there instead of in Lambda environment variables means anyone
+    who can view the function's configuration still cannot see them; only this
+    function's IAM role may read the secret.
+    """
+    value = json.loads(client.get_secret_value(SecretId=secret_id)["SecretString"])
+    return value["github_token"], value["webhook_secret"]
+
+
+_secrets = None  # kept between calls in the same Lambda container: one read per cold start
+
+
 def lambda_handler(event, context):  # pragma: no cover - AWS entry point
+    global _secrets
+    if _secrets is None:
+        import boto3  # ships with the AWS Lambda Python runtime, so nothing extra to package
+        _secrets = load_secrets(os.environ["SECRET_ID"], boto3.client("secretsmanager"))
+    token, webhook_secret = _secrets
     explainer = None
     if os.environ.get("BEDROCK_MODEL_ID"):
         from .explain import bedrock_explainer
         explainer = bedrock_explainer()
-    return handle_event(event, GitHubClient(os.environ["GITHUB_TOKEN"]),
-                        os.environ["WEBHOOK_SECRET"], explainer)
+    return handle_event(event, GitHubClient(token), webhook_secret, explainer)

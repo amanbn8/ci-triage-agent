@@ -3,18 +3,19 @@ Transform: AWS::Serverless-2016-10-31
 Description: CI Triage Agent - comments a diagnosis on PRs whose CI fails
 
 Parameters:
-  GitHubToken:
+  SecretName:
     Type: String
-    NoEcho: true
-    Description: Token with actions:read and pull-requests:write
-  WebhookSecret:
-    Type: String
-    NoEcho: true
-    Description: Shared secret configured on the GitHub webhook
+    Default: ci-triage-agent
+    Description: >-
+      Name of an AWS Secrets Manager secret (create it before deploying) whose value is
+      {"github_token": "...", "webhook_secret": "..."}. The token needs actions:read and
+      pull-requests:write.
   BedrockModelId:
     Type: String
     Default: ""
-    Description: Optional Bedrock model id for the AI fallback (leave empty to disable)
+    Description: >-
+      Optional Bedrock model id or inference profile id for the AI fallback, e.g.
+      us.anthropic.claude-haiku-4-5-20251001-v1:0 (leave empty to disable)
 
 Conditions:
   UseBedrock: !Not [!Equals [!Ref BedrockModelId, ""]]
@@ -30,16 +31,33 @@ Resources:
       MemorySize: 256
       Environment:
         Variables:
-          GITHUB_TOKEN: !Ref GitHubToken
-          WEBHOOK_SECRET: !Ref WebhookSecret
+          SECRET_ID: !Ref SecretName   # only the name; the values stay in Secrets Manager
           BEDROCK_MODEL_ID: !Ref BedrockModelId
       Policies:
+        # Read this one secret, nothing else. Secrets Manager adds a random
+        # 6-character suffix to every secret ARN, hence the "-??????".
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}-??????"
+        # Invoke only the configured model: directly, or through its inference
+        # profile. A cross-region profile routes to the same model in several
+        # regions, so the foundation model is allowed in any region but only
+        # when the call comes through that profile (AWS's documented pattern).
         - !If
           - UseBedrock
           - Statement:
               - Effect: Allow
                 Action: bedrock:InvokeModel
-                Resource: "*"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
+                Condition:
+                  StringLike:
+                    bedrock:InferenceProfileArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
           - !Ref AWS::NoValue
       FunctionUrlConfig:
         AuthType: NONE   # GitHub cannot sign AWS requests; the HMAC check authenticates instead

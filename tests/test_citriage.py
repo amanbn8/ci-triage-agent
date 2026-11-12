@@ -13,7 +13,7 @@ from citriage.logparse import clean_line, failing_step, split_steps
 from citriage.mcp_server import handle, serve
 from citriage.report import MARKER, to_markdown
 from citriage.triage import triage_log
-from citriage.webhook import GitHubClient, handle_event, verify_signature
+from citriage.webhook import GitHubClient, handle_event, load_secrets, verify_signature
 
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
 
@@ -324,6 +324,17 @@ class WebhookTests(unittest.TestCase):
         handle_event(self.event(dict(self.PAYLOAD, workflow_run=run)), gh, self.SECRET)
         self.assertEqual(gh.branch_lookups, [("amanbn8/demo", "someone", "fix-sed")])
         self.assertEqual([pr for _, pr, _ in gh.comments], [34])
+
+    def test_secrets_come_from_secrets_manager(self):
+        # Limitation 11: the token and webhook secret used to be plain Lambda env vars.
+        class FakeSecretsManager:
+            def get_secret_value(self, SecretId):
+                self.asked_for = SecretId
+                return {"SecretString": '{"github_token": "ghp_x", "webhook_secret": "s3cret"}'}
+
+        client = FakeSecretsManager()
+        self.assertEqual(load_secrets("ci-triage-agent", client), ("ghp_x", "s3cret"))
+        self.assertEqual(client.asked_for, "ci-triage-agent")
 
     def test_successful_run_and_other_events_ignored(self):
         gh = FakeGitHub("")
