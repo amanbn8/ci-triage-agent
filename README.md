@@ -60,7 +60,7 @@ only the evidence lines, which keeps cost low and the answer grounded in the act
 ## Quick start (Python 3.10+, no dependencies)
 
 ```bash
-python -m unittest -v                                   # 43 tests
+python -m unittest -v                                   # 44 tests
 python -m citriage triage samples/pytest_failure.log
 python -m citriage triage samples/npm_network.log --json
 python -m citriage flaky --junit samples/junit_run1.xml:abc123 samples/junit_run2.xml:abc123
@@ -92,12 +92,14 @@ tools/call, ping), so it needs no SDK.
 ## Run it on every failed PR build (AWS Lambda)
 
 The GitHub token and webhook secret live in **AWS Secrets Manager**, not in Lambda environment
-variables. Create the secret once (put the JSON in a file so the token does not end up in your
-shell history):
+variables. Create the secret once. Put the JSON in a file so the token does not end up in your
+shell history, and keep that file **outside this folder**: `sam build` packages everything in
+the project folder into the Lambda code.
 
 ```bash
-# secret.json: {"github_token": "<token with actions:read, pull-requests:write>", "webhook_secret": "<random string>"}
-aws secretsmanager create-secret --name ci-triage-agent --secret-string file://secret.json
+# ~/secret.json: {"github_token": "<token with actions:read, pull-requests:write>", "webhook_secret": "<random string>"}
+aws secretsmanager create-secret --name ci-triage-agent --secret-string file://$HOME/secret.json
+rm ~/secret.json
 sam build && sam deploy --guided     # asks for SecretName and an optional BedrockModelId
 ```
 

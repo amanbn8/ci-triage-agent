@@ -45,7 +45,10 @@ RULES: tuple[Rule, ...] = (
     ),
     Rule(
         "bsd-gnu-tool-mismatch", "platform_specific", "Shell script uses GNU-only flags on macOS",
-        (r"sed: \d+: .*(invalid command code|extra characters)", r"grep: invalid option -- P",
+        # BSD sed may print a line break inside the quoted file name, splitting
+        # 'sed: 1: "file' and '": invalid command code f' over two lines, so the
+        # BSD-only phrase "invalid command code" is matched on its own.
+        (r"invalid command code \S|sed: \d+: .*extra characters", r"grep: invalid option -- P",
          r"readlink: illegal option -- f", r"(date|stat|xargs|find): illegal option",
          r"^usage: sed "),
         "macOS runners ship BSD tools. Use portable flags (e.g. `sed -i ''` vs `sed -i`, avoid "
