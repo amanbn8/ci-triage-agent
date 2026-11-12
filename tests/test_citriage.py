@@ -11,9 +11,10 @@ from citriage.fingerprint import fingerprint, normalise
 from citriage.flaky import TestResult, find_flaky, parse_junit
 from citriage.logparse import clean_line, failing_step, split_steps
 from citriage.mcp_server import handle, serve
-from citriage.report import MARKER, to_markdown
+from citriage.report import MARKER, MAX_JOBS_IN_COMMENT, combined_markdown, to_markdown
 from citriage.triage import triage_log
-from citriage.webhook import GitHubClient, handle_event, load_secrets, verify_signature
+from citriage.webhook import (GitHubClient, SqsQueue, handle_sqs_event, load_secrets, process_run,
+                              receive, verify_signature)
 
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
 
@@ -147,6 +148,14 @@ class ReportAndExplainTests(unittest.TestCase):
         # The fence is one backtick longer than any run in the evidence, so it stays closed.
         self.assertIn(f"````\n{line}\n````", md)
 
+    def test_combined_comment_stays_under_github_limit(self):
+        many = [(f"job {i}", "", triage_log("##[group]Run x\nPermission denied " + "x" * 10_000 + "\n"))
+                for i in range(MAX_JOBS_IN_COMMENT + 5)]
+        md = combined_markdown(many)
+        self.assertEqual(md.count("\n#### "), MAX_JOBS_IN_COMMENT)
+        self.assertIn("5 more failed jobs", md)
+        self.assertLess(len(md), 65_536)
+
     def test_llm_only_called_when_rules_unsure(self):
         calls = []
 
@@ -259,21 +268,33 @@ class McpTests(unittest.TestCase):
 
 
 class FakeGitHub:
+    """Pretends to be GitHub. `log` is one log, or a dict of job name -> log for several failed jobs."""
+
     def __init__(self, log, fork_prs=()):
-        self.log, self.comments, self.fork_prs, self.branch_lookups = log, [], list(fork_prs), []
+        self.logs = log if isinstance(log, dict) else {"build (macos-latest)": log}
+        self.comments, self.fork_prs, self.branch_lookups = [], list(fork_prs), []
 
     def failed_jobs(self, repo, run_id):
-        return [{"id": 7, "name": "build (macos-latest)", "html_url": "https://gh/job/7"}]
+        return [{"id": name, "name": name, "html_url": f"https://gh/job/{i}"}
+                for i, name in enumerate(self.logs)]
 
     def open_prs_for_branch(self, repo, owner, branch):
         self.branch_lookups.append((repo, owner, branch))
         return self.fork_prs
 
     def job_log(self, repo, job_id):
-        return self.log
+        return self.logs[job_id]
 
     def upsert_comment(self, repo, pr, body, marker):
         self.comments.append((repo, pr, body))
+
+
+class FakeQueue:
+    def __init__(self):
+        self.messages = []
+
+    def send(self, message):
+        self.messages.append(message)
 
 
 class WebhookTests(unittest.TestCase):
@@ -289,6 +310,14 @@ class WebhookTests(unittest.TestCase):
             "isBase64Encoded": b64,
         }
 
+    def run_webhook(self, event, gh):
+        """Receive the delivery, then process whatever was queued, like the two Lambdas do."""
+        queue = FakeQueue()
+        resp = receive(event, self.SECRET, queue)
+        for message in queue.messages:
+            process_run(json.loads(json.dumps(message)), gh)  # round-trip like SQS does
+        return resp
+
     PAYLOAD = {
         "action": "completed",
         "repository": {"full_name": "amanbn8/demo"},
@@ -298,12 +327,12 @@ class WebhookTests(unittest.TestCase):
     def test_signature_check(self):
         self.assertFalse(verify_signature(self.SECRET, b"{}", None))
         gh = FakeGitHub("")
-        self.assertEqual(handle_event(self.event(self.PAYLOAD, signed=False), gh, self.SECRET)["statusCode"], 401)
+        self.assertEqual(self.run_webhook(self.event(self.PAYLOAD, signed=False), gh)["statusCode"], 401)
 
     def test_failed_run_gets_pr_comment(self):
         gh = FakeGitHub(sample("macos_sed.log"))
-        resp = handle_event(self.event(self.PAYLOAD, b64=True), gh, self.SECRET)
-        self.assertEqual(resp["statusCode"], 200)
+        resp = self.run_webhook(self.event(self.PAYLOAD, b64=True), gh)
+        self.assertEqual(resp["statusCode"], 202)
         repo, pr, body = gh.comments[0]
         self.assertEqual((repo, pr), ("amanbn8/demo", 12))
         self.assertIn("platform_specific", body)
@@ -312,8 +341,8 @@ class WebhookTests(unittest.TestCase):
         # Limitation 8: runs that hit the time limit end as "timed_out", not "failure".
         gh = FakeGitHub(sample("oom.log"))
         run = {**self.PAYLOAD["workflow_run"], "conclusion": "timed_out"}
-        resp = handle_event(self.event(dict(self.PAYLOAD, workflow_run=run)), gh, self.SECRET)
-        self.assertEqual(resp["statusCode"], 200)
+        resp = self.run_webhook(self.event(dict(self.PAYLOAD, workflow_run=run)), gh)
+        self.assertEqual(resp["statusCode"], 202)
         self.assertEqual(len(gh.comments), 1)
 
     def test_fork_pr_found_by_branch(self):
@@ -321,7 +350,7 @@ class WebhookTests(unittest.TestCase):
         gh = FakeGitHub(sample("macos_sed.log"), fork_prs=[34])
         run = {**self.PAYLOAD["workflow_run"], "pull_requests": [], "event": "pull_request",
                "head_branch": "fix-sed", "head_repository": {"owner": {"login": "someone"}}}
-        handle_event(self.event(dict(self.PAYLOAD, workflow_run=run)), gh, self.SECRET)
+        self.run_webhook(self.event(dict(self.PAYLOAD, workflow_run=run)), gh)
         self.assertEqual(gh.branch_lookups, [("amanbn8/demo", "someone", "fix-sed")])
         self.assertEqual([pr for _, pr, _ in gh.comments], [34])
 
@@ -339,9 +368,56 @@ class WebhookTests(unittest.TestCase):
     def test_successful_run_and_other_events_ignored(self):
         gh = FakeGitHub("")
         ok = dict(self.PAYLOAD, workflow_run={**self.PAYLOAD["workflow_run"], "conclusion": "success"})
-        self.assertEqual(handle_event(self.event(ok), gh, self.SECRET)["statusCode"], 202)
-        self.assertEqual(handle_event(self.event(self.PAYLOAD, event_type="push"), gh, self.SECRET)["statusCode"], 202)
+        self.assertEqual(self.run_webhook(self.event(ok), gh)["statusCode"], 202)
+        self.assertEqual(self.run_webhook(self.event(self.PAYLOAD, event_type="push"), gh)["statusCode"], 202)
         self.assertEqual(gh.comments, [])
+
+    def test_receiver_only_queues_and_replies_at_once(self):
+        # Limitation 2: GitHub waits at most 10 s, so the receiver must not fetch
+        # logs or call Bedrock; it only checks the delivery and queues a small note.
+        queue = FakeQueue()
+        resp = receive(self.event(self.PAYLOAD), self.SECRET, queue)
+        self.assertEqual(resp["statusCode"], 202)
+        self.assertEqual(len(queue.messages), 1)
+        self.assertEqual(queue.messages[0]["repo"], "amanbn8/demo")
+        self.assertEqual(queue.messages[0]["run"]["id"], 99)
+        self.assertEqual(queue.messages[0]["run"]["pull_requests"], [{"number": 12}])
+
+    def test_signed_but_broken_payload_gets_400(self):
+        queue = FakeQueue()
+        for body in ("not json", '{"action": "completed", "workflow_run": {"conclusion": "failure"}}'):
+            sig = "sha256=" + hmac.new(self.SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
+            event = {"headers": {"X-GitHub-Event": "workflow_run", "X-Hub-Signature-256": sig}, "body": body}
+            with self.subTest(body=body):
+                self.assertEqual(receive(event, self.SECRET, queue)["statusCode"], 400)
+        self.assertEqual(queue.messages, [])
+
+    def test_several_failed_jobs_share_one_combined_comment(self):
+        # Limitation 3: each job used to overwrite the same comment, so only the last survived.
+        gh = FakeGitHub({"build (macos-latest)": sample("macos_sed.log"),
+                         "build (ubuntu-latest)": sample("npm_network.log")})
+        self.run_webhook(self.event(self.PAYLOAD), gh)
+        self.assertEqual(len(gh.comments), 1)  # one write per PR, not one per job
+        body = gh.comments[0][2]
+        self.assertTrue(body.startswith(MARKER))
+        for text in ("2 failed jobs", "build (macos-latest)", "platform_specific",
+                     "build (ubuntu-latest)", "network"):
+            self.assertIn(text, body)
+
+    def test_sqs_event_is_processed(self):
+        gh = FakeGitHub(sample("macos_sed.log"))
+        message = {"repo": "amanbn8/demo", "run": {"id": 99, "pull_requests": [{"number": 12}]}}
+        handle_sqs_event({"Records": [{"body": json.dumps(message)}]}, gh)
+        self.assertEqual([(repo, pr) for repo, pr, _ in gh.comments], [("amanbn8/demo", 12)])
+
+    def test_sqs_queue_sends_json(self):
+        class FakeSqsClient:
+            def send_message(self, QueueUrl, MessageBody):
+                self.sent = (QueueUrl, json.loads(MessageBody))
+
+        client = FakeSqsClient()
+        SqsQueue(client, "https://sqs/q").send({"repo": "o/r"})
+        self.assertEqual(client.sent, ("https://sqs/q", {"repo": "o/r"}))
 
 
 class FakeResponse:

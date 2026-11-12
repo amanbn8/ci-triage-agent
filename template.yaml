@@ -2,6 +2,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: CI Triage Agent - comments a diagnosis on PRs whose CI fails
 
+# GitHub -> ReceiverFunction (checks the signature, queues a note, replies at once)
+#        -> TriageQueue -> WorkerFunction (fetches logs, triages, comments on the PR)
+# Notes that fail 3 times move to TriageDeadLetterQueue instead of being lost.
+
 Parameters:
   SecretName:
     Type: String
@@ -14,28 +18,83 @@ Parameters:
     Type: String
     Default: ""
     Description: >-
-      Optional Bedrock model id or inference profile id for the AI fallback, e.g.
-      us.anthropic.claude-haiku-4-5-20251001-v1:0 (leave empty to disable)
+      Optional Bedrock model id or inference profile id for the AI fallback, copied from
+      the Bedrock console (leave empty to disable)
 
 Conditions:
   UseBedrock: !Not [!Equals [!Ref BedrockModelId, ""]]
 
+Globals:
+  Function:
+    CodeUri: .
+    Runtime: python3.12
+    MemorySize: 256
+    Environment:
+      Variables:
+        SECRET_ID: !Ref SecretName   # only the name; the values stay in Secrets Manager
+
 Resources:
-  TriageFunction:
+  TriageDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600   # 14 days to look at what went wrong
+
+  TriageQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # AWS: must be at least the worker's timeout; recommended 6x (6 x 120 s).
+      VisibilityTimeout: 720
+      MessageRetentionPeriod: 86400     # 1 day
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TriageDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  ReceiverFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: .
-      Handler: citriage.webhook.lambda_handler
-      Runtime: python3.12
-      Timeout: 60
-      MemorySize: 256
+      Handler: citriage.webhook.receiver_handler
+      Timeout: 10        # GitHub stops waiting after 10 seconds
       Environment:
         Variables:
-          SECRET_ID: !Ref SecretName   # only the name; the values stay in Secrets Manager
-          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          QUEUE_URL: !Ref TriageQueue
       Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TriageQueue.QueueName
         # Read this one secret, nothing else. Secrets Manager adds a random
         # 6-character suffix to every secret ARN, hence the "-??????".
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}-??????"
+      FunctionUrlConfig:
+        AuthType: NONE   # GitHub cannot sign AWS requests; the HMAC check authenticates instead
+
+  # Since October 2025 a public function URL needs lambda:InvokeFunction as well as
+  # lambda:InvokeFunctionUrl (AWS Lambda docs). SAM adds the policy for NONE URLs;
+  # this states the second permission explicitly, limited to calls via the URL.
+  ReceiverInvokeViaUrl:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ReceiverFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: citriage.webhook.worker_handler
+      Timeout: 120
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Events:
+        FromQueue:
+          Type: SQS        # SAM also grants the worker permission to read the queue
+          Properties:
+            Queue: !GetAtt TriageQueue.Arn
+            BatchSize: 1   # one run per invocation: a failure retries only that run
+      Policies:
         - Statement:
             - Effect: Allow
               Action: secretsmanager:GetSecretValue
@@ -59,10 +118,11 @@ Resources:
                   StringLike:
                     bedrock:InferenceProfileArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
           - !Ref AWS::NoValue
-      FunctionUrlConfig:
-        AuthType: NONE   # GitHub cannot sign AWS requests; the HMAC check authenticates instead
 
 Outputs:
   WebhookUrl:
     Description: "Paste this into GitHub -> Settings -> Webhooks (event: Workflow runs)"
-    Value: !GetAtt TriageFunctionUrl.FunctionUrl
+    Value: !GetAtt ReceiverFunctionUrl.FunctionUrl
+  DeadLetterQueueUrl:
+    Description: Runs that failed 3 times end up here
+    Value: !Ref TriageDeadLetterQueue
