@@ -13,7 +13,7 @@ from citriage.logparse import clean_line, failing_step, split_steps
 from citriage.mcp_server import handle, serve
 from citriage.report import MARKER, to_markdown
 from citriage.triage import triage_log
-from citriage.webhook import handle_event, verify_signature
+from citriage.webhook import GitHubClient, handle_event, verify_signature
 
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
 
@@ -139,6 +139,14 @@ class ReportAndExplainTests(unittest.TestCase):
         self.assertIn("BSD", md)
         self.assertIn("[build (macos-latest)](https://x)", md)
 
+    def test_backticks_in_log_cannot_escape_code_block(self):
+        # Logs from fork PRs are written by strangers: a line containing ```
+        # must not close our code block and inject Markdown into the comment.
+        line = "Permission denied ``` [click me](https://evil.example) @everyone"
+        md = to_markdown(triage_log(f"##[group]Run make\n{line}\n"))
+        # The fence is one backtick longer than any run in the evidence, so it stays closed.
+        self.assertIn(f"````\n{line}\n````", md)
+
     def test_llm_only_called_when_rules_unsure(self):
         calls = []
 
@@ -251,11 +259,15 @@ class McpTests(unittest.TestCase):
 
 
 class FakeGitHub:
-    def __init__(self, log):
-        self.log, self.comments = log, []
+    def __init__(self, log, fork_prs=()):
+        self.log, self.comments, self.fork_prs, self.branch_lookups = log, [], list(fork_prs), []
 
     def failed_jobs(self, repo, run_id):
         return [{"id": 7, "name": "build (macos-latest)", "html_url": "https://gh/job/7"}]
+
+    def open_prs_for_branch(self, repo, owner, branch):
+        self.branch_lookups.append((repo, owner, branch))
+        return self.fork_prs
 
     def job_log(self, repo, job_id):
         return self.log
@@ -296,12 +308,94 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual((repo, pr), ("amanbn8/demo", 12))
         self.assertIn("platform_specific", body)
 
+    def test_timed_out_run_is_triaged(self):
+        # Limitation 8: runs that hit the time limit end as "timed_out", not "failure".
+        gh = FakeGitHub(sample("oom.log"))
+        run = {**self.PAYLOAD["workflow_run"], "conclusion": "timed_out"}
+        resp = handle_event(self.event(dict(self.PAYLOAD, workflow_run=run)), gh, self.SECRET)
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertEqual(len(gh.comments), 1)
+
+    def test_fork_pr_found_by_branch(self):
+        # Limitation 7: GitHub leaves pull_requests empty for PRs from forks.
+        gh = FakeGitHub(sample("macos_sed.log"), fork_prs=[34])
+        run = {**self.PAYLOAD["workflow_run"], "pull_requests": [], "event": "pull_request",
+               "head_branch": "fix-sed", "head_repository": {"owner": {"login": "someone"}}}
+        handle_event(self.event(dict(self.PAYLOAD, workflow_run=run)), gh, self.SECRET)
+        self.assertEqual(gh.branch_lookups, [("amanbn8/demo", "someone", "fix-sed")])
+        self.assertEqual([pr for _, pr, _ in gh.comments], [34])
+
     def test_successful_run_and_other_events_ignored(self):
         gh = FakeGitHub("")
         ok = dict(self.PAYLOAD, workflow_run={**self.PAYLOAD["workflow_run"], "conclusion": "success"})
         self.assertEqual(handle_event(self.event(ok), gh, self.SECRET)["statusCode"], 202)
         self.assertEqual(handle_event(self.event(self.PAYLOAD, event_type="push"), gh, self.SECRET)["statusCode"], 202)
         self.assertEqual(gh.comments, [])
+
+
+class FakeResponse:
+    def __init__(self, data):
+        self.data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.data if isinstance(self.data, bytes) else json.dumps(self.data).encode()
+
+
+class FakeHTTP:
+    """Stands in for urllib.request.urlopen: answers from a dict of (method, url) -> data."""
+
+    def __init__(self, routes):
+        self.routes, self.requests = routes, []
+
+    def __call__(self, req, timeout=None):
+        self.requests.append(req)
+        return FakeResponse(self.routes.get((req.get_method(), req.full_url)))
+
+
+class GitHubClientTests(unittest.TestCase):
+    """Limitation 13: the real GitHub client, tested against a fake HTTP layer."""
+    API = "https://api.github.com/repos/o/r"
+
+    def test_reads_every_page_of_jobs(self):
+        # Limitation 6: only the first 100 jobs used to be read.
+        page1 = [{"id": i, "conclusion": "success"} for i in range(99)] + [{"id": 99, "conclusion": "failure"}]
+        page2 = [{"id": 100, "conclusion": "timed_out"}]
+        http = FakeHTTP({
+            ("GET", f"{self.API}/actions/runs/5/jobs?per_page=100&page=1"): {"jobs": page1},
+            ("GET", f"{self.API}/actions/runs/5/jobs?per_page=100&page=2"): {"jobs": page2},
+        })
+        jobs = GitHubClient("tok", urlopen=http).failed_jobs("o/r", 5)
+        self.assertEqual([j["id"] for j in jobs], [99, 100])
+        self.assertEqual(http.requests[0].get_header("Authorization"), "Bearer tok")
+
+    def test_updates_marker_comment_found_on_a_later_page(self):
+        page1 = [{"id": i, "body": "lgtm"} for i in range(100)]
+        page2 = [{"id": 555, "body": "<!-- m -->\nold diagnosis"}]
+        http = FakeHTTP({
+            ("GET", f"{self.API}/issues/12/comments?per_page=100&page=1"): page1,
+            ("GET", f"{self.API}/issues/12/comments?per_page=100&page=2"): page2,
+        })
+        GitHubClient("tok", urlopen=http).upsert_comment("o/r", 12, "new", "<!-- m -->")
+        last = http.requests[-1]
+        self.assertEqual((last.get_method(), last.full_url), ("PATCH", f"{self.API}/issues/comments/555"))
+        self.assertEqual(json.loads(last.data), {"body": "new"})
+
+    def test_posts_new_comment_when_none_has_the_marker(self):
+        http = FakeHTTP({("GET", f"{self.API}/issues/12/comments?per_page=100&page=1"): []})
+        GitHubClient("tok", urlopen=http).upsert_comment("o/r", 12, "new", "<!-- m -->")
+        last = http.requests[-1]
+        self.assertEqual((last.get_method(), last.full_url), ("POST", f"{self.API}/issues/12/comments"))
+
+    def test_finds_open_pr_from_a_fork(self):
+        http = FakeHTTP({("GET", f"{self.API}/pulls?state=open&head=someone%3Afix%2Fsed&per_page=100&page=1"):
+                         [{"number": 34}]})
+        self.assertEqual(GitHubClient("tok", urlopen=http).open_prs_for_branch("o/r", "someone", "fix/sed"), [34])
 
 
 if __name__ == "__main__":
