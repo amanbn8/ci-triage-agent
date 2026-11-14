@@ -29,6 +29,16 @@ Suggested fix: macOS runners ship BSD tools. Use portable flags (sed -i '' vs se
 | **Detect flaky tests** | Reads JUnit XML; a test that passed *and* failed on the same commit is flaky (reports fail rate, and flip rate in run order) |
 | **AI fallback** | Only when rules are unsure, sends the failing step's evidence lines (not the whole log) to an LLM on **Amazon Bedrock** |
 
+## Want your coding agent to fix it too?
+
+This repository is free and stays free. There is also a paid add-on,
+**[CI Failure Triage, an agent skill](https://amanbansal.gumroad.com/l/ci-failure-triage)** ($9, one-time),
+for Claude Code and other coding agents that load skills. It bundles this engine and adds:
+
+- **GitLab CI logs** as well as GitHub Actions
+- **A fix playbook**: for each of the 15 failure types, how to confirm the cause, the usual fix, and what a wrong fix looks like
+- **A step-by-step workflow** the agent follows: fetch the log, diagnose, decide re-run or fix, make the fix, report what is still unverified
+
 ## Architecture
 
 ```
